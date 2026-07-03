@@ -1,7 +1,12 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/ad_service.dart';
+import '../services/app_state.dart';
+import '../services/firebase_service.dart';
 
 class Transaction {
+  final String id;
   final String date;
   final String type; // 'INCOME' or 'EXPENSE'
   final String category;
@@ -9,12 +14,31 @@ class Transaction {
   final String description;
 
   Transaction({
+    required this.id,
     required this.date,
     required this.type,
     required this.category,
     required this.amount,
     required this.description,
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'date': date,
+        'type': type,
+        'category': category,
+        'amount': amount,
+        'description': description,
+      };
+
+  factory Transaction.fromJson(Map<String, dynamic> json) => Transaction(
+        id: json['id'] ?? '',
+        date: json['date'] ?? '',
+        type: json['type'] ?? '',
+        category: json['category'] ?? '',
+        amount: (json['amount'] as num?)?.toDouble() ?? 0.0,
+        description: json['description'] ?? '',
+      );
 }
 
 class FinanceScreen extends StatefulWidget {
@@ -61,36 +85,102 @@ class _FinanceScreenState extends State<FinanceScreen> {
     'Other Expenses',
   ];
 
-  List<Transaction> transactions = [
-    Transaction(
-      date: '2025-10-27',
-      type: 'INCOME',
-      category: 'Crop Sale',
-      amount: 15000.00,
-      description: 'rice sale',
-    ),
-    Transaction(
-      date: '2025-10-27',
-      type: 'EXPENSE',
-      category: 'Other Income',
-      amount: -35000.00,
-      description: 'travelling expenses',
-    ),
-    Transaction(
-      date: '2025-10-26',
-      type: 'INCOME',
-      category: 'Government Subsidy',
-      amount: 25000.00,
-      description: 'Crop subsidy received',
-    ),
-    Transaction(
-      date: '2025-10-25',
-      type: 'EXPENSE',
-      category: 'Seeds & Fertilizers',
-      amount: -12000.00,
-      description: 'Purchased seeds for next season',
-    ),
-  ];
+  List<Transaction> transactions = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTransactions();
+  }
+
+  Future<void> _loadTransactions() async {
+    setState(() {
+      _isLoading = true;
+    });
+    final userId = AppState().currentUserId ?? '';
+    if (userId.isNotEmpty) {
+      if (FirebaseService().isAvailable) {
+        final list = await FirebaseService().getTransactions(userId);
+        if (list.isNotEmpty) {
+          setState(() {
+            transactions = list.map((e) => Transaction.fromJson(e)).toList();
+            _isLoading = false;
+          });
+          // Cache locally
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('finance_key_$userId', jsonEncode(list));
+          return;
+        }
+      }
+      
+      // Local fallback
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final jsonStr = prefs.getString('finance_key_$userId');
+        if (jsonStr != null) {
+          final List<dynamic> decoded = jsonDecode(jsonStr);
+          setState(() {
+            transactions = decoded.map((e) => Transaction.fromJson(e)).toList();
+          });
+        } else {
+          // Setup default transactions if empty local db
+          transactions = [
+            Transaction(
+              id: 't_seed_1',
+              date: '2025-10-27',
+              type: 'INCOME',
+              category: 'Crop Sale',
+              amount: 15000.00,
+              description: 'rice sale',
+            ),
+            Transaction(
+              id: 't_seed_2',
+              date: '2025-10-27',
+              type: 'EXPENSE',
+              category: 'Other Income',
+              amount: -35000.00,
+              description: 'travelling expenses',
+            ),
+            Transaction(
+              id: 't_seed_3',
+              date: '2025-10-26',
+              type: 'INCOME',
+              category: 'Government Subsidy',
+              amount: 25000.00,
+              description: 'Crop subsidy received',
+            ),
+            Transaction(
+              id: 't_seed_4',
+              date: '2025-10-25',
+              type: 'EXPENSE',
+              category: 'Seeds & Fertilizers',
+              amount: -12000.00,
+              description: 'Purchased seeds for next season',
+            ),
+          ];
+        }
+      } catch (e) {
+        debugPrint("Error loading transactions: $e");
+      }
+    }
+    setState(() {
+      _isLoading = false;
+    });
+  }
+
+  Future<void> _saveTransactionsLocally() async {
+    final userId = AppState().currentUserId ?? '';
+    if (userId.isNotEmpty) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final jsonStr = jsonEncode(transactions.map((t) => t.toJson()).toList());
+        await prefs.setString('finance_key_$userId', jsonStr);
+      } catch (e) {
+        debugPrint("Error saving transactions: $e");
+      }
+    }
+  }
 
   Map<String, Map<String, double>> getMonthlyReports() {
     Map<String, Map<String, double>> reports = {};
@@ -174,7 +264,7 @@ class _FinanceScreenState extends State<FinanceScreen> {
     return categoryTotals;
   }
 
-  void addTransaction() {
+  Future<void> addTransaction() async {
     if (amount <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter a valid amount')),
@@ -182,23 +272,29 @@ class _FinanceScreenState extends State<FinanceScreen> {
       return;
     }
 
-    setState(() {
-      transactions.insert(
-        0,
-        Transaction(
-          date: selectedDate,
-          type: selectedType.toUpperCase(),
-          category: selectedCategory,
-          amount: selectedType == 'Income' ? amount : -amount,
-          description: description.isEmpty ? 'Transaction' : description,
-        ),
-      );
+    final id = "t_${DateTime.now().millisecondsSinceEpoch}";
+    final newTransaction = Transaction(
+      id: id,
+      date: selectedDate,
+      type: selectedType.toUpperCase(),
+      category: selectedCategory,
+      amount: selectedType == 'Income' ? amount : -amount,
+      description: description.isEmpty ? 'Transaction' : description,
+    );
 
+    setState(() {
+      transactions.insert(0, newTransaction);
       // Reset form
       amount = 0;
       selectedCategory = selectedType == 'Income' ? 'Crop Sale' : 'Seeds & Fertilizers';
       description = '';
     });
+
+    final userId = AppState().currentUserId ?? '';
+    if (FirebaseService().isAvailable && userId.isNotEmpty) {
+      await FirebaseService().saveTransaction(userId, id, newTransaction.toJson());
+    }
+    await _saveTransactionsLocally();
 
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Transaction added successfully!')),
@@ -524,10 +620,14 @@ class _FinanceScreenState extends State<FinanceScreen> {
               child: const Text('Cancel'),
             ),
             TextButton(
-              onPressed: () {
+              onPressed: () async {
+                if (FirebaseService().isAvailable) {
+                  await FirebaseService().deleteTransaction(transaction.id);
+                }
                 setState(() {
                   transactions.remove(transaction);
                 });
+                await _saveTransactionsLocally();
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Transaction deleted successfully!')),
@@ -714,7 +814,7 @@ class _FinanceScreenState extends State<FinanceScreen> {
                   child: const Text('Cancel'),
                 ),
                 TextButton(
-                  onPressed: () {
+                  onPressed: () async {
                     final double? parsedAmount = double.tryParse(amountController.text);
                     if (parsedAmount == null || parsedAmount <= 0) {
                       ScaffoldMessenger.of(context).showSnackBar(
@@ -723,17 +823,26 @@ class _FinanceScreenState extends State<FinanceScreen> {
                       return;
                     }
 
+                    final updatedTransaction = Transaction(
+                      id: transaction.id,
+                      date: editDate,
+                      type: editType.toUpperCase(),
+                      category: editCategory,
+                      amount: editType == 'Income' ? parsedAmount : -parsedAmount,
+                      description: descriptionController.text.isEmpty
+                          ? 'Transaction'
+                          : descriptionController.text,
+                    );
+
                     setState(() {
-                      transactions[index] = Transaction(
-                        date: editDate,
-                        type: editType.toUpperCase(),
-                        category: editCategory,
-                        amount: editType == 'Income' ? parsedAmount : -parsedAmount,
-                        description: descriptionController.text.isEmpty
-                            ? 'Transaction'
-                            : descriptionController.text,
-                      );
+                      transactions[index] = updatedTransaction;
                     });
+
+                    final userId = AppState().currentUserId ?? '';
+                    if (FirebaseService().isAvailable && userId.isNotEmpty) {
+                      await FirebaseService().saveTransaction(userId, transaction.id, updatedTransaction.toJson());
+                    }
+                    await _saveTransactionsLocally();
 
                     Navigator.pop(context);
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -775,7 +884,9 @@ class _FinanceScreenState extends State<FinanceScreen> {
         ),
         centerTitle: false,
       ),
-      body: SingleChildScrollView(
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator(color: Color(0xFF22C55E)))
+          : SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [

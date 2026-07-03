@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/app_state.dart';
 import '../services/ad_service.dart';
+import '../services/firebase_service.dart';
 
 class Note {
   final String id;
@@ -27,10 +28,10 @@ class Note {
       };
 
   factory Note.fromJson(Map<String, dynamic> json) => Note(
-        id: json['id'],
-        content: json['content'],
+        id: json['id'] ?? '',
+        content: json['content'] ?? '',
         imagePath: json['imagePath'],
-        createdAt: DateTime.parse(json['createdAt']),
+        createdAt: json['createdAt'] != null ? DateTime.parse(json['createdAt']) : DateTime.now(),
       );
 }
 
@@ -60,9 +61,25 @@ class _NotesScreenState extends State<NotesScreen> {
   }
 
   Future<void> _loadNotes() async {
+    final userId = AppState().currentUserId ?? '';
+    if (userId.isEmpty) return;
+
+    if (FirebaseService().isAvailable) {
+      final list = await FirebaseService().getNotes(userId);
+      if (list.isNotEmpty) {
+        setState(() {
+          _notes = list.map((item) => Note.fromJson(item)).toList();
+        });
+        // Cache to local SharedPreferences
+        final prefs = await SharedPreferences.getInstance();
+        final notesString = jsonEncode(list);
+        await prefs.setString('notes_key_$userId', notesString);
+        return;
+      }
+    }
+
     try {
       final prefs = await SharedPreferences.getInstance();
-      final userId = AppState().currentUserId ?? '';
       final notesString = prefs.getString('notes_key_$userId');
       if (notesString != null) {
         final List<dynamic> decoded = jsonDecode(notesString);
@@ -136,7 +153,7 @@ class _NotesScreenState extends State<NotesScreen> {
     );
   }
 
-  void _saveOrUpdateNote() {
+  Future<void> _saveOrUpdateNote() async {
     final content = _noteController.text.trim();
     if (content.isEmpty && _selectedImagePath == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -145,27 +162,56 @@ class _NotesScreenState extends State<NotesScreen> {
       return;
     }
 
+    final userId = AppState().currentUserId ?? '';
+
+    // Upload image if it is selected and is a local file path
+    String? uploadedPath = _selectedImagePath;
+    if (_selectedImagePath != null && !_selectedImagePath!.startsWith('http')) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const Center(child: CircularProgressIndicator(color: Color(0xFF2E7D32))),
+      );
+      
+      try {
+        uploadedPath = await FirebaseService().uploadImage(File(_selectedImagePath!), 'notes');
+      } catch (e) {
+        debugPrint("Error uploading note image: $e");
+      }
+      
+      if (mounted) Navigator.pop(context);
+    }
+
     if (_editingNoteId != null) {
-      // Update existing note
       final noteIndex = _notes.indexWhere((n) => n.id == _editingNoteId);
       if (noteIndex != -1) {
+        final updatedNote = _notes[noteIndex];
+        updatedNote.content = content;
+        updatedNote.imagePath = uploadedPath;
+        
         setState(() {
-          _notes[noteIndex].content = content;
-          _notes[noteIndex].imagePath = _selectedImagePath;
           _editingNoteId = null;
         });
+
+        if (FirebaseService().isAvailable && userId.isNotEmpty) {
+          await FirebaseService().saveNote(userId, updatedNote.id, updatedNote.toJson());
+        }
       }
     } else {
-      // Add new note
       final newNote = Note(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         content: content,
-        imagePath: _selectedImagePath,
+        imagePath: uploadedPath,
         createdAt: DateTime.now(),
       );
+      
       setState(() {
         _notes.insert(0, newNote);
       });
+
+      if (FirebaseService().isAvailable && userId.isNotEmpty) {
+        await FirebaseService().saveNote(userId, newNote.id, newNote.toJson());
+      }
     }
 
     _noteController.clear();
@@ -184,7 +230,11 @@ class _NotesScreenState extends State<NotesScreen> {
     });
   }
 
-  void _deleteNote(String id) {
+  Future<void> _deleteNote(String id) async {
+    if (FirebaseService().isAvailable) {
+      await FirebaseService().deleteNote(id);
+    }
+
     setState(() {
       _notes.removeWhere((n) => n.id == id);
       if (_editingNoteId == id) {
@@ -265,12 +315,19 @@ class _NotesScreenState extends State<NotesScreen> {
                           children: [
                             ClipRRect(
                               borderRadius: BorderRadius.circular(12),
-                              child: Image.file(
-                                File(_selectedImagePath!),
-                                height: 120,
-                                width: 120,
-                                fit: BoxFit.cover,
-                              ),
+                              child: _selectedImagePath!.startsWith('http')
+                                  ? Image.network(
+                                      _selectedImagePath!,
+                                      height: 120,
+                                      width: 120,
+                                      fit: BoxFit.cover,
+                                    )
+                                  : Image.file(
+                                      File(_selectedImagePath!),
+                                      height: 120,
+                                      width: 120,
+                                      fit: BoxFit.cover,
+                                    ),
                             ),
                             Positioned(
                               top: 4,
@@ -358,7 +415,9 @@ class _NotesScreenState extends State<NotesScreen> {
                       itemCount: _notes.length,
                       itemBuilder: (context, index) {
                         final note = _notes[index];
-                        final hasValidImage = note.imagePath != null && File(note.imagePath!).existsSync();
+                        final isNetworkImage = note.imagePath != null && note.imagePath!.startsWith('http');
+                        final hasValidLocalImage = note.imagePath != null && !isNetworkImage && File(note.imagePath!).existsSync();
+                        final hasValidImage = isNetworkImage || hasValidLocalImage;
                         
                         return Container(
                           margin: const EdgeInsets.only(bottom: 16),
@@ -378,12 +437,24 @@ class _NotesScreenState extends State<NotesScreen> {
                                 if (hasValidImage) ...[
                                   ClipRRect(
                                     borderRadius: BorderRadius.circular(12),
-                                    child: Image.file(
-                                      File(note.imagePath!),
-                                      height: 200,
-                                      width: double.infinity,
-                                      fit: BoxFit.cover,
-                                    ),
+                                    child: isNetworkImage
+                                        ? Image.network(
+                                            note.imagePath!,
+                                            height: 200,
+                                            width: double.infinity,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (context, error, stackTrace) => Container(
+                                              height: 120,
+                                              color: Colors.grey[300],
+                                              child: const Icon(Icons.broken_image, color: Colors.grey),
+                                            ),
+                                          )
+                                        : Image.file(
+                                            File(note.imagePath!),
+                                            height: 200,
+                                            width: double.infinity,
+                                            fit: BoxFit.cover,
+                                          ),
                                   ),
                                   const SizedBox(height: 12),
                                 ],

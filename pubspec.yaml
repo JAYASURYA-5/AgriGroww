@@ -19,6 +19,10 @@ dependencies:
   url_launcher: ^6.1.12
   video_player: ^2.6.0
   google_mobile_ads: ^9.0.0
+  firebase_core: any
+  firebase_auth: any
+  cloud_firestore: any
+  firebase_storage: any
 
 dev_dependencies:
   flutter_test:

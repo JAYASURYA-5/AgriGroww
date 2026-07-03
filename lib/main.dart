@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
 import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'services/app_state.dart';
@@ -6,6 +8,16 @@ import 'services/ad_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // Initialize Firebase with try-catch so that missing configurations don't crash compile/startup
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+    debugPrint("Firebase successfully initialized!");
+  } catch (e) {
+    debugPrint("Firebase initialization skipped/failed: $e");
+  }
   
   // Initialize AdService
   await AdService.init();

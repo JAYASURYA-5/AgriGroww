@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'firebase_service.dart';
 
 class AppState {
   static final AppState _instance = AppState._internal();
@@ -30,6 +32,16 @@ class AppState {
       // Load active session if saved
       currentUserId = prefs.getString('logged_in_user_id');
       if (currentUserId != null) {
+        // Try fetching user profile from Firestore if Firebase is available
+        if (FirebaseService().isAvailable) {
+          final firestoreProfile = await FirebaseService().getUserProfile(currentUserId!);
+          if (firestoreProfile != null) {
+            currentUser = firestoreProfile;
+            return;
+          }
+        }
+
+        // Fallback to local SharedPreferences
         final usersJson = prefs.getString('registered_users');
         if (usersJson != null) {
           final Map<String, dynamic> users = jsonDecode(usersJson);
@@ -50,6 +62,43 @@ class AppState {
 
   // Authenticate user
   Future<bool> login(String identifier, String password) async {
+    // 1. Try Firebase Auth if available
+    if (FirebaseService().isAvailable) {
+      try {
+        final email = identifier.contains('@') ? identifier.trim() : "${identifier.trim()}@agrigroww.com";
+        final credential = await FirebaseAuth.instance.signInWithEmailAndPassword(
+          email: email,
+          password: password,
+        );
+        
+        final user = credential.user;
+        if (user != null) {
+          currentUserId = user.uid;
+          final firestoreProfile = await FirebaseService().getUserProfile(user.uid);
+          currentUser = firestoreProfile ?? {
+            'uid': user.uid,
+            'email': user.email,
+            'mobile': identifier.contains('@') ? '' : identifier,
+            'fullName': identifier.split('@').first,
+          };
+          
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('logged_in_user_id', user.uid);
+          
+          // Sync to local registered_users database
+          final usersJson = prefs.getString('registered_users') ?? '{}';
+          final Map<String, dynamic> users = jsonDecode(usersJson);
+          users[user.uid] = currentUser;
+          await prefs.setString('registered_users', jsonEncode(users));
+
+          return true;
+        }
+      } catch (e) {
+        debugPrint('Firebase Auth login failed: $e. Falling back to SharedPreferences.');
+      }
+    }
+
+    // 2. Fallback local login
     try {
       final prefs = await SharedPreferences.getInstance();
       final usersJson = prefs.getString('registered_users');
@@ -88,20 +137,55 @@ class AppState {
 
   // Register user
   Future<bool> registerUser(Map<String, dynamic> userData) async {
+    final email = userData['email']?.toString().toLowerCase().trim();
+    final mobile = userData['mobile']?.toString().trim();
+    final password = userData['password']?.toString() ?? 'TempPass123';
+    final targetEmail = (email != null && email.isNotEmpty) ? email : "$mobile@agrigroww.com";
+
+    // 1. Try Firebase Auth if available
+    if (FirebaseService().isAvailable) {
+      try {
+        final credential = await FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: targetEmail,
+          password: password,
+        );
+        final user = credential.user;
+        if (user != null) {
+          currentUserId = user.uid;
+          userData['uid'] = user.uid;
+          
+          // Save to Firestore
+          await FirebaseService().saveUserProfile(user.uid, userData);
+          currentUser = userData;
+          
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('logged_in_user_id', user.uid);
+          
+          // Update local SharedPreferences db as well
+          final usersJson = prefs.getString('registered_users') ?? '{}';
+          final Map<String, dynamic> users = jsonDecode(usersJson);
+          users[user.uid] = userData;
+          await prefs.setString('registered_users', jsonEncode(users));
+
+          return true;
+        }
+      } catch (e) {
+        debugPrint('Firebase Auth register failed: $e. Falling back to SharedPreferences.');
+      }
+    }
+
+    // 2. Fallback local registration
     try {
       final prefs = await SharedPreferences.getInstance();
       final usersJson = prefs.getString('registered_users') ?? '{}';
       final Map<String, dynamic> users = jsonDecode(usersJson);
-
-      final email = userData['email']?.toString().toLowerCase();
-      final mobile = userData['mobile']?.toString();
 
       // Check if user already exists
       for (var user in users.values) {
         final existingEmail = user['email']?.toString().toLowerCase();
         final existingMobile = user['mobile']?.toString();
 
-        if (existingEmail == email || existingMobile == mobile) {
+        if ((email != null && existingEmail == email) || (mobile != null && existingMobile == mobile)) {
           return false; // User already registered
         }
       }
@@ -125,6 +209,16 @@ class AppState {
 
   // Logout session
   Future<void> logout() async {
+    // 1. Try Firebase Auth signout
+    if (FirebaseService().isAvailable) {
+      try {
+        await FirebaseAuth.instance.signOut();
+      } catch (e) {
+        debugPrint('Error during Firebase Auth signout: $e');
+      }
+    }
+
+    // 2. Clear local variables and preferences
     try {
       final prefs = await SharedPreferences.getInstance();
       currentUserId = null;
@@ -137,12 +231,24 @@ class AppState {
 
   // Update current user profile details
   Future<void> updateCurrentUser(Map<String, dynamic> updatedData) async {
+    if (currentUserId == null) return;
+    
+    // 1. Try Firebase sync
+    if (FirebaseService().isAvailable) {
+      try {
+        await FirebaseService().saveUserProfile(currentUserId!, updatedData);
+      } catch (e) {
+        debugPrint('Error updating user profile in Firestore: $e');
+      }
+    }
+
+    // 2. Sync to local SharedPreferences
     try {
       final prefs = await SharedPreferences.getInstance();
       final usersJson = prefs.getString('registered_users');
       if (usersJson != null) {
         final Map<String, dynamic> users = jsonDecode(usersJson);
-        if (currentUserId != null && users.containsKey(currentUserId)) {
+        if (users.containsKey(currentUserId)) {
           final existingUser = Map<String, dynamic>.from(users[currentUserId]);
           existingUser.addAll(updatedData);
           users[currentUserId!] = existingUser;

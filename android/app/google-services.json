@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "701827917765",
+    "project_id": "agrigroww-2005",
+    "storage_bucket": "agrigroww-2005.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:701827917765:android:9732b70e87510e6ce10dac",
+        "android_client_info": {
+          "package_name": "com.example.agrigrow"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAdkRC4Q_Q7Vxv0e-mtImzN7JM0Ucn3P0Y"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

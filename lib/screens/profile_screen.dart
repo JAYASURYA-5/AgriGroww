@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import '../services/app_state.dart';
+import '../services/firebase_service.dart';
 import 'login_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -19,11 +20,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
       final ImagePicker picker = ImagePicker();
       final XFile? image = await picker.pickImage(source: ImageSource.gallery);
       if (image != null) {
-        await AppState().updateCurrentUser({'photo': image.path});
-        setState(() {});
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Profile photo updated successfully!'), backgroundColor: Color(0xFF22C55E)),
+        // Show loading indicator
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => const Center(child: CircularProgressIndicator(color: Color(0xFF22C55E))),
         );
+
+        String? finalPhotoPath = image.path;
+        if (FirebaseService().isAvailable) {
+          try {
+            finalPhotoPath = await FirebaseService().uploadImage(File(image.path), 'profiles');
+          } catch (e) {
+            debugPrint('Error uploading profile picture to storage: $e');
+          }
+        }
+
+        if (mounted) Navigator.pop(context);
+
+        if (finalPhotoPath != null) {
+          await AppState().updateCurrentUser({'photo': finalPhotoPath});
+          setState(() {});
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Profile photo updated successfully!'), backgroundColor: Color(0xFF22C55E)),
+            );
+          }
+        }
       }
     } catch (e) {
       debugPrint('Error picking profile picture: $e');
